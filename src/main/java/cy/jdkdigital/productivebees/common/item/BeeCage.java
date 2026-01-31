@@ -14,6 +14,7 @@ import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.NbtUtils;
 import net.minecraft.network.chat.Component;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.InteractionHand;
@@ -38,8 +39,7 @@ import javax.annotation.Nullable;
 import java.util.List;
 import java.util.Optional;
 
-public class BeeCage extends Item
-{
+public class BeeCage extends Item {
     public BeeCage(Properties properties) {
         super(properties);
     }
@@ -66,7 +66,6 @@ public class BeeCage extends Item
     public InteractionResult useOn(UseOnContext context) {
         Level playerWorld = context.getPlayer().getCommandSenderWorld();
         ItemStack stack = context.getItemInHand();
-
         if (playerWorld.isClientSide() || !isFilled(stack)) {
             return InteractionResult.FAIL;
         }
@@ -75,7 +74,6 @@ public class BeeCage extends Item
         BlockPos pos = context.getClickedPos();
 
         Bee entity = getEntityFromStack(stack, level, true);
-
         if (entity != null) {
             if (entity.isFlowerValid(pos)) {
                 entity.setSavedFlowerPos(pos);
@@ -94,12 +92,10 @@ public class BeeCage extends Item
 
             BlockPos blockPos = pos.relative(context.getClickedFace());
             entity.setPos(blockPos.getX() + 0.5D, blockPos.getY(), blockPos.getZ() + 0.5D);
-
             level.addFreshEntity(entity);
 
             postItemUse(context);
         }
-
         return InteractionResult.SUCCESS;
     }
 
@@ -147,40 +143,53 @@ public class BeeCage extends Item
         }
 
         player.swing(hand);
-
         if (player instanceof ServerPlayer) {
             ModAdvancements.CATCH_BEE.get().trigger((ServerPlayer) player, cageStack);
         }
-        target.discard();
 
+        target.discard();
         return InteractionResult.SUCCESS;
     }
 
+    /**
+     * CHANGED: We store the technical ID instead of the translated name.
+     */
     public static void captureEntity(Bee target, ItemStack cageStack) {
         CompoundTag nbt = new CompoundTag();
-        nbt.putString("entity", EntityType.getKey(target.getType()).toString());
+        
+        // We store the technical ID of the entity
+        ResourceLocation entityId = EntityType.getKey(target.getType());
+        nbt.putString("entity", entityId.toString());
+        
+        // We store IDs for localization purposes.
+        nbt.putString("entityId", entityId.toString());
+        
+        // Store the user name separately (if available)
         if (target.hasCustomName()) {
-            nbt.putString("name", target.getCustomName().getString());
-        } else {
-            nbt.putString("name", target.getName().getString());
+            nbt.putString("customName", target.getCustomName().getString());
         }
+        
+        // We keep the original name as a backup option.
+        nbt.putString("originalName", target.getType().getDescription().getString());
+        
+        // We are keeping the old “name” field for backward compatibility.
+        nbt.putString("name", target.getType().getDescription().getString());
+        
         target.saveWithoutId(nbt);
-
         AdvancedBeehiveBlockEntityAbstract.removeIgnoredTags(nbt);
+        
         if (target.hasHive()) {
             nbt.put("HivePos", NbtUtils.writeBlockPos(target.getHivePos()));
         }
-
+        
         nbt.putBoolean("isProductiveBee", target instanceof ProductiveBee);
-
         String modId = BuiltInRegistries.ENTITY_TYPE.getKey(target.getType()).getNamespace();
         String modName = ModList.get().getModContainerById(modId).get().getClass().getSimpleName();
-
         if (modId.equals("minecraft")) {
             modName = "Minecraft";
         }
         nbt.putString("mod", modName);
-
+        
         cageStack.set(DataComponents.CUSTOM_DATA, CustomData.of(nbt));
     }
 
@@ -199,7 +208,6 @@ public class BeeCage extends Item
                 if (withInfo) {
                     entity.load(tag);
                 }
-
                 if (entity instanceof Bee) {
                     if (entity instanceof ConfigurableBee && !withInfo) {
                         ((ConfigurableBee) entity).setBeeType(tag.getString("type"));
@@ -211,31 +219,91 @@ public class BeeCage extends Item
         return null;
     }
 
+    /**
+     * CHANGED: Use localized name instead of text from NBT
+     */
     @Nonnull
     @Override
     public Component getName(ItemStack stack) {
         if (!isFilled(stack)) {
             return Component.translatable(this.getDescriptionId());
         }
-
-        String entityId = stack.get(DataComponents.CUSTOM_DATA).copyTag().getString("name");
-        return Component.translatable(this.getDescriptionId()).append(Component.literal(" (" + entityId + ")"));
+        
+        var data = stack.get(DataComponents.CUSTOM_DATA);
+        if (data != null) {
+            var tag = data.copyTag();
+            
+            // We obtain the localized name of the bee
+            Component beeNameComponent = getLocalizedBeeName(tag);
+            
+            // Forming the full name of the cell
+            return Component.translatable(this.getDescriptionId())
+                    .append(Component.literal(" ("))
+                    .append(beeNameComponent)
+                    .append(Component.literal(")"));
+        }
+        
+        return Component.translatable(this.getDescriptionId());
+    }
+    
+    /**
+     * NEW METHOD: Obtaining a localized bee name
+     */
+    private Component getLocalizedBeeName(CompoundTag tag) {
+        // 1. Checking the username
+        if (tag.contains("customName")) {
+            String customName = tag.getString("customName");
+            if (!customName.isEmpty()) {
+                return Component.literal(customName);
+            }
+        }
+        
+        // 2. Get the localized name via the technical ID
+        if (tag.contains("entityId")) {
+            String entityId = tag.getString("entityId");
+            if (!entityId.isEmpty()) {
+                // We form the localization key
+                String translationKey = "entity." + entityId.replace(':', '.');
+                Component translatedName = Component.translatable(translationKey);
+                
+                // Checking if a translation exists
+                String translatedString = translatedName.getString();
+                if (!translatedString.equals(translationKey)) {
+                    return translatedName;
+                }
+            }
+        }
+        
+        // 3. Alternative: original title
+        if (tag.contains("originalName")) {
+            return Component.literal(tag.getString("originalName"));
+        }
+        
+        // 4. Last resort: the old “name” field
+        if (tag.contains("name")) {
+            return Component.literal(tag.getString("name"));
+        }
+        
+        // 5. Backup option
+        return Component.translatable("entity.minecraft.bee");
     }
 
     @Override
     public void appendHoverText(ItemStack pStack, TooltipContext pContext, List<Component> pTooltipComponents, TooltipFlag pTooltipFlag) {
         super.appendHoverText(pStack, pContext, pTooltipComponents, pTooltipFlag);
-
+        
         var data = pStack.get(DataComponents.CUSTOM_DATA);
         if (data != null && !data.getUnsafe().equals(new CompoundTag())) {
             var tag = data.copyTag();
+            
             if (Screen.hasShiftDown()) {
                 boolean hasStung = tag.getBoolean("HasStung");
                 if (hasStung) {
                     pTooltipComponents.add(Component.translatable("productivebees.information.health.dying").withStyle(ChatFormatting.RED).withStyle(ChatFormatting.ITALIC));
                 }
+                
                 BeeHelper.populateBeeInfoFromTag(tag, pTooltipComponents);
-
+                
                 if (tag.contains("HivePos")) {
                     pTooltipComponents.add(Component.translatable("productivebees.information.cage_release"));
                 }
